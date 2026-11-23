@@ -10,3 +10,11 @@ DATABASE_PATH = os.getenv("DATABASE_PATH", os.path.join(DATA_DIR, "metadata.db")
 
 HOST = os.getenv("CONTROLLER_HOST", "0.0.0.0")
 PORT = int(os.getenv("CONTROLLER_PORT", 8000))
+
+# High Availability (HA) & Journaling configuration
+CONTROLLER_ROLE = os.getenv("CONTROLLER_ROLE", "ACTIVE")
+JOURNAL_NODES = [
+    url.strip()
+    for url in os.getenv("JOURNAL_NODES", "").split(",")
+    if url.strip()
+]

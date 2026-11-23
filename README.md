@@ -6,14 +6,16 @@ A fault-tolerant, chunk-based distributed cloud object store built with Python a
 
 ## Architecture Overview
 
-* **1 Controller Node**: Exposes the client REST API gateway on port `8000`, manages metadata (SQLite with WAL mode), worker health (heartbeat watchdog), chunk placement, and automated re-replication.
+* **1 Controller Node (Active)**: Exposes the client REST API gateway on port `8000`, manages metadata (SQLite with WAL mode), worker health (heartbeat watchdog), chunk placement, and automated re-replication.
+* **1 Standby Controller Node**: Hot standby coordinator on port `8002` tailing edit logs, performing periodic **FSImage checkpointing**, and providing automatic zero-downtime failover if the primary controller fails.
+* **3 Quorum JournalNodes**: Dedicated distributed editlog service (`journalnode1`, `journalnode2`, `journalnode3` on ports `8011`-`8013`) providing majority-quorum write durability for all metadata transactions.
 * **4 Storage Worker Nodes**: Lightweight storage nodes (`worker1`, `worker2`, `worker3`, `worker4`) on port `8001` with isolated persistent Docker volume mounts (`/data`).
 * **Replication Factor**: 2 copies per chunk stored across distinct workers.
 * **Chunk Size**: 1 MB (1,048,576 bytes; final chunk $\le$ 1 MB).
 * **Network**: Docker bridge network (`storage-net`) with internal service DNS.
 * **Orchestration**: Docker Compose without Kubernetes.
 
-For complete architectural diagrams, failure handling protocols, and API specs, see [ARCHITECTURE.md](file:///Users/mithileshsaiyechuri/Acads/Sem%207/Cloud/Project/ARCHITECTURE.md).
+
 
 ---
 
@@ -23,28 +25,50 @@ For complete architectural diagrams, failure handling protocols, and API specs, 
 DistributedCloudStore/
 ├── ARCHITECTURE.md          # Comprehensive architecture design document
 ├── README.md                # Build, run, and interaction guide
-├── docker-compose.yml       # Cluster deployment definition (Controller + 4 Workers)
-├── controller/
+├── docker-compose.yml       # Cluster deployment (Controllers + JournalNodes + Workers)
+├── controller/              # Primary Active Controller
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── src/
-│       ├── main.py          # FastAPI REST endpoints (Client & Internal APIs)
-│       ├── database.py      # SQLite metadata engine (objects, chunks, replicas, workers)
-│       ├── manager.py       # Cluster manager, health watchdog, & self-healing loop
+│       ├── main.py          # FastAPI REST endpoints & editlog producer
+│       ├── database.py      # SQLite metadata engine (WAL mode)
+│       ├── journal_client.py# Quorum Journal client for edit transactions
+│       ├── manager.py       # Cluster manager, health watchdog & auto-healing
 │       ├── models.py        # Pydantic schemas
 │       └── config.py        # Controller settings
+├── standby_controller/      # Hot Standby Controller & FSImage Engine
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── src/
+│       ├── main.py          # Standby API (read-only until promoted to Active)
+│       ├── syncer.py        # Continuous EditLog tailer & replayer
+│       ├── checkpoint.py    # Periodic FSImage snapshot creator & restorer
+│       ├── failover.py      # Active controller failure detector & auto-promotion
+│       ├── database.py      # Local replicated metadata store
+│       ├── manager.py       # Cluster manager activated upon promotion
+│       └── config.py        # Standby settings
+├── journal_node/            # Quorum JournalNode Service
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── src/
+│       ├── main.py          # Append-only EditLog & FSImage storage endpoints
+│       ├── journal.py       # WAL engine with transaction IDs (txid)
+│       ├── models.py        # Log entry & snapshot schemas
+│       └── config.py        # JournalNode settings
 ├── worker/
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── src/
 │       ├── main.py          # Worker API (PUT/GET/DELETE chunks, list chunks)
 │       ├── storage.py       # Atomic persistent file storage in /data
-│       ├── heartbeat.py     # Background worker registration & heartbeat reporter
+│       ├── heartbeat.py     # Multi-controller registration & heartbeat reporter
 │       └── config.py        # Worker settings
 ├── tests/
-│   └── test_unit.py         # Unit tests for Database and Storage Engine
+│   ├── test_unit.py         # Unit tests for Database and Storage Engine
+│   └── test_ha.py           # Unit tests for JournalEngine, EditLogs, & FSImage
 └── scripts/
-    └── demo_all.sh          # Automated end-to-end demo script covering all 6 rubric points
+    ├── demo_all.sh          # Baseline rubric demo (all 6 required scenarios)
+    └── demo_ha.sh           # High Availability, EditLog quorum & Failover demo
 ```
 
 ---
@@ -91,7 +115,24 @@ This script automatically executes and verifies:
 
 ---
 
-## Manual API Walkthrough
+## High Availability & Journaling Demonstration
+
+To demonstrate the **Active/Standby Controller, Quorum JournalNodes, EditLogs, and FSImage Checkpointing** extra feature:
+```bash
+./scripts/demo_ha.sh
+```
+
+This script automatically executes and verifies:
+1. **Quorum JournalNodes**: Confirms 3 JournalNodes (`journalnode1`, `journalnode2`, `journalnode3`) are online.
+2. **EditLog Transaction Logging**: Uploads a file to the Active Controller (`:8000`) and verifies that transactions (`OP_CREATE_OBJECT`, `OP_ADD_CHUNK`) are durably committed to the Journal quorum with sequential transaction IDs (`txid`).
+3. **Standby State Synchronization**: Confirms that the Standby Controller (`:8002`) tails the edit log in real-time and reflects the exact metadata state.
+4. **FSImage Checkpointing**: Triggers an FSImage snapshot, creating a point-in-time state checkpoint and verifying the checkpoint payload.
+5. **Controller Crash & Automatic Failover**: Stops the primary controller (`docker stop controller`), observes the Standby Controller detecting the failure and auto-promoting to `ACTIVE`.
+6. **Zero Data Loss Verification**: Downloads the uploaded object from the newly promoted controller and verifies 100% SHA-256 hash match.
+7. **Write Availability on Promoted Controller**: Uploads a new object to the promoted controller to prove full write capability during master failure.
+8. **Cluster Recovery**: Restarts the primary controller (`docker start controller`).
+
+---
 
 ### 1. Upload an Object
 ```bash

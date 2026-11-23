@@ -371,3 +371,69 @@ DistributedCloudStore/
 | **4. Metadata Management** | Dedicated endpoints for system & custom metadata; JSON schema | Update metadata via `PATCH`, verify with `GET /metadata` without re-uploading file |
 | **5. Worker Failure Handling** | Heartbeat watchdog + under-replication healing worker | `docker stop worker2`, verify file download still works, inspect re-replication on healthy workers, then `docker start worker2` |
 | **6. Data Integrity** | Per-chunk SHA-256 verification and replica auto-healing | Tamper with a chunk file directly on worker disk; download object, confirm success, and verify file was repaired |
+
+---
+
+## 12. Advanced Extra Feature: High Availability (HA) Controller with Quorum JournalNodes & FSImage Checkpointing
+
+### 12.1 Overview & Problem Statement
+The baseline project configuration relies on a single Controller node. If the Controller crashes, the cluster suffers from a **Single Point of Failure (SPOF)**—all metadata becomes unreachable and client requests fail even if all 4 worker nodes are healthy.
+
+To eliminate this SPOF, the system implements an enterprise-grade **High Availability (HA)** architecture modeled directly on **Hadoop HDFS Quorum Journal Manager (QJM)** with **Active/Standby NameNodes**:
+
+```mermaid
+graph TD
+    Client["Client Traffic"]
+
+    subgraph "HA Controller Layer"
+        ActiveCtrl["Active Controller (:8000)<br/>• Serves Reads & Writes<br/>• Assigns monotonic txid"]
+        StandbyCtrl["Standby Controller (:8002)<br/>• Tails EditLog in near-real-time<br/>• Creates FSImage snapshots<br/>• Auto-promotes on failover"]
+    end
+
+    subgraph "Quorum JournalNodes (Majority ACK = 2/3)"
+        JN1["JournalNode 1 (:8011)"]
+        JN2["JournalNode 2 (:8012)"]
+        JN3["JournalNode 3 (:8013)"]
+    end
+
+    subgraph "Storage Layer"
+        Workers["4 Storage Workers (:8001)<br/>Heartbeats to both Controllers"]
+    end
+
+    Client -->|Normal Operations| ActiveCtrl
+    Client -.->|Failover Traffic| StandbyCtrl
+
+    ActiveCtrl -->|Quorum EditLog Writes| JN1
+    ActiveCtrl -->|Quorum EditLog Writes| JN2
+    ActiveCtrl -->|Quorum EditLog Writes| JN3
+
+    StandbyCtrl -->|Tail Edits| JN1
+    StandbyCtrl -->|Tail Edits| JN2
+    StandbyCtrl -->|Tail Edits| JN3
+
+    ActiveCtrl -->|Manage Chunks| Workers
+    StandbyCtrl -.->|Post-Promotion Manage Chunks| Workers
+    Workers -.->|Heartbeat / Block Reports| ActiveCtrl
+    Workers -.->|Heartbeat / Block Reports| StandbyCtrl
+
+    StandbyCtrl -.->|Health Watchdog| ActiveCtrl
+```
+
+### 12.2 Key Components
+
+1. **Active Controller (`controller/`)**:
+   - Accepts all client mutating requests (`POST /api/v1/objects`, `PATCH`, `DELETE`).
+   - For every state mutation, assigns a sequential, monotonic transaction ID (`txid`).
+   - Broadcasts the mutation as an **EditLog** record (`OP_CREATE_OBJECT`, `OP_ADD_CHUNK`, `OP_UPDATE_METADATA`, `OP_DELETE_OBJECT`, `OP_ADD_REPLICA`, `OP_REMOVE_REPLICA`, `OP_REGISTER_WORKER`) to the 3 JournalNodes.
+   - Commits the operation only after receiving acknowledgement from a **strict majority quorum** ($\ge 2$ out of 3 JournalNodes).
+
+2. **Quorum JournalNodes (`journal_node/`)**:
+   - Independent, lightweight distributed consensus service running across 3 instances (`journalnode1`, `journalnode2`, `journalnode3`).
+   - Maintains an append-only log of metadata transactions indexed by `txid`.
+   - Exposes high-throughput endpoints for log appends, tail-reading (`GET /v1/journal/edits?since_txid=...`), and snapshot persistence.
+
+3. **Standby Controller (`standby_controller/`)**:
+   - Operates in hot-standby mode on port `8002`.
+   - **EditLog Syncer**: Continuously polls the JournalNodes for new transactions (`since_txid = last_applied_txid`) and replays them into its local SQLite metadata database.
+   - **FSImage Checkpointing Engine**: Periodically (and on-demand via `POST /internal/ha/checkpoint`), exports the complete point-in-time metadata snapshot to disk (`fsimage_txid_<txid>.json`) and synchronizes it to the JournalNodes, enabling rapid node recovery without replaying millions of individual log records.
+   - **Automatic Failover Watchdog**: Continuously health-checks the Active Controller (`GET /health`). If the Active Controller is unreachable for `FAILOVER_TIMEOUT` (5 seconds), the Standby Controller automatically promotes itself to `ACTIVE`, drains any remaining edits from the JournalNodes, starts the worker watchdog, and begins servicing all client read and write requests with zero data loss.

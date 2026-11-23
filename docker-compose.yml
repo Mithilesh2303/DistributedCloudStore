@@ -1,6 +1,66 @@
 version: "3.8"
 
 services:
+  # --------------------------------------------------------------------------
+  # High Availability Quorum JournalNodes (Distributed EditLog & FSImage Store)
+  # --------------------------------------------------------------------------
+  journalnode1:
+    build:
+      context: ./journal_node
+      dockerfile: Dockerfile
+    container_name: journalnode1
+    ports:
+      - "8011:8010"
+    environment:
+      - JOURNAL_NODE_ID=journalnode1
+      - JOURNAL_HOST=0.0.0.0
+      - JOURNAL_PORT=8010
+      - DATA_DIR=/data
+    volumes:
+      - jn1_data:/data
+    networks:
+      - storage-net
+    restart: unless-stopped
+
+  journalnode2:
+    build:
+      context: ./journal_node
+      dockerfile: Dockerfile
+    container_name: journalnode2
+    ports:
+      - "8012:8010"
+    environment:
+      - JOURNAL_NODE_ID=journalnode2
+      - JOURNAL_HOST=0.0.0.0
+      - JOURNAL_PORT=8010
+      - DATA_DIR=/data
+    volumes:
+      - jn2_data:/data
+    networks:
+      - storage-net
+    restart: unless-stopped
+
+  journalnode3:
+    build:
+      context: ./journal_node
+      dockerfile: Dockerfile
+    container_name: journalnode3
+    ports:
+      - "8013:8010"
+    environment:
+      - JOURNAL_NODE_ID=journalnode3
+      - JOURNAL_HOST=0.0.0.0
+      - JOURNAL_PORT=8010
+      - DATA_DIR=/data
+    volumes:
+      - jn3_data:/data
+    networks:
+      - storage-net
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Primary Active Controller Node
+  # --------------------------------------------------------------------------
   controller:
     build:
       context: ./controller
@@ -11,17 +71,60 @@ services:
     environment:
       - CONTROLLER_HOST=0.0.0.0
       - CONTROLLER_PORT=8000
+      - CONTROLLER_ROLE=ACTIVE
       - DATA_DIR=/data
-      - CHUNK_SIZE=1048576
+      - CHUNK_SIZE=1048576 # 1MB
       - REPLICATION_FACTOR=2
       - HEARTBEAT_TIMEOUT=6.0
       - HEAL_CHECK_INTERVAL=2.0
+      - JOURNAL_NODES=http://journalnode1:8010,http://journalnode2:8010,http://journalnode3:8010
     volumes:
       - controller_data:/data
     networks:
       - storage-net
+    depends_on:
+      - journalnode1
+      - journalnode2
+      - journalnode3
     restart: unless-stopped
 
+  # --------------------------------------------------------------------------
+  # Standby Controller Node (Hot Standby + FSImage Checkpointer + Auto Failover)
+  # --------------------------------------------------------------------------
+  standby-controller:
+    build:
+      context: ./standby_controller
+      dockerfile: Dockerfile
+    container_name: standby-controller
+    ports:
+      - "8002:8000"
+    environment:
+      - STANDBY_HOST=0.0.0.0
+      - STANDBY_PORT=8000
+      - ACTIVE_CONTROLLER_URL=http://controller:8000
+      - JOURNAL_NODES=http://journalnode1:8010,http://journalnode2:8010,http://journalnode3:8010
+      - DATA_DIR=/data
+      - SYNC_INTERVAL=1.0
+      - CHECKPOINT_INTERVAL=10.0
+      - FAILOVER_TIMEOUT=5.0
+      - REPLICATION_FACTOR=2
+      - CHUNK_SIZE=1048576
+      - HEARTBEAT_TIMEOUT=6.0
+      - HEAL_CHECK_INTERVAL=2.0
+    volumes:
+      - standby_controller_data:/data
+    networks:
+      - storage-net
+    depends_on:
+      - controller
+      - journalnode1
+      - journalnode2
+      - journalnode3
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------------
+  # Storage Worker Nodes
+  # --------------------------------------------------------------------------
   worker1:
     build:
       context: ./worker
@@ -32,6 +135,7 @@ services:
       - WORKER_HOST=worker1
       - WORKER_PORT=8001
       - CONTROLLER_URL=http://controller:8000
+      - CONTROLLER_URLS=http://controller:8000,http://standby-controller:8000
       - DATA_DIR=/data
       - HEARTBEAT_INTERVAL=2.0
     volumes:
@@ -52,6 +156,7 @@ services:
       - WORKER_HOST=worker2
       - WORKER_PORT=8001
       - CONTROLLER_URL=http://controller:8000
+      - CONTROLLER_URLS=http://controller:8000,http://standby-controller:8000
       - DATA_DIR=/data
       - HEARTBEAT_INTERVAL=2.0
     volumes:
@@ -72,6 +177,7 @@ services:
       - WORKER_HOST=worker3
       - WORKER_PORT=8001
       - CONTROLLER_URL=http://controller:8000
+      - CONTROLLER_URLS=http://controller:8000,http://standby-controller:8000
       - DATA_DIR=/data
       - HEARTBEAT_INTERVAL=2.0
     volumes:
@@ -92,6 +198,7 @@ services:
       - WORKER_HOST=worker4
       - WORKER_PORT=8001
       - CONTROLLER_URL=http://controller:8000
+      - CONTROLLER_URLS=http://controller:8000,http://standby-controller:8000
       - DATA_DIR=/data
       - HEARTBEAT_INTERVAL=2.0
     volumes:
@@ -104,6 +211,10 @@ services:
 
 volumes:
   controller_data:
+  standby_controller_data:
+  jn1_data:
+  jn2_data:
+  jn3_data:
   worker1_data:
   worker2_data:
   worker3_data:

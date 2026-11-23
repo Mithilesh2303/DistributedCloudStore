@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 import json
 import logging
 import os
@@ -19,12 +20,16 @@ class Database:
             os.makedirs(db_dir, exist_ok=True)
         self.init_db()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_connection(self):
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA foreign_keys=ON;")
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def init_db(self):
         with self._lock:

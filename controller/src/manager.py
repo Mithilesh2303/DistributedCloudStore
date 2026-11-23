@@ -16,8 +16,9 @@ logger = logging.getLogger("controller.manager")
 
 
 class ClusterManager:
-    def __init__(self, db: Database):
+    def __init__(self, db: Database, journal_client=None):
         self.db = db
+        self.journal_client = journal_client
         self.client = httpx.AsyncClient(timeout=10.0)
         self._running = False
         self._watchdog_task: Optional[asyncio.Task] = None
@@ -239,10 +240,27 @@ class ClusterManager:
                 stored = await self.store_chunk_on_worker(target_worker, chunk_id, chunk_data)
                 if stored:
                     self.db.add_replica(chunk_id, target_worker["worker_id"])
+                    if self.journal_client:
+                        try:
+                            await self.journal_client.log_edit(
+                                "OP_ADD_REPLICA",
+                                {"chunk_id": chunk_id, "worker_id": target_worker["worker_id"]},
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to log OP_ADD_REPLICA to journal: %s", e)
+
                     # Remove the offline replica so we maintain the exact replication factor
                     offline_replicas = [r for r in replicas if r not in healthy_map]
                     for off_r in offline_replicas:
                         self.db.remove_replica(chunk_id, off_r)
+                        if self.journal_client:
+                            try:
+                                await self.journal_client.log_edit(
+                                    "OP_REMOVE_REPLICA",
+                                    {"chunk_id": chunk_id, "worker_id": off_r},
+                                )
+                            except Exception as e:
+                                logger.warning("Failed to log OP_REMOVE_REPLICA to journal: %s", e)
 
                     worker_counts[target_worker["worker_id"]] = worker_counts.get(target_worker["worker_id"], 0) + 1
                     logger.info(

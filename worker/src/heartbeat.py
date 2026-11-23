@@ -34,44 +34,40 @@ class HeartbeatClient:
         logger.info("Heartbeat client stopped for worker %s", config.WORKER_ID)
 
     async def _register(self) -> bool:
-        url = f"{config.CONTROLLER_URL}/internal/workers/register"
         payload = {
             "worker_id": config.WORKER_ID,
             "host": config.WORKER_HOST,
             "port": config.WORKER_PORT,
         }
-        try:
-            resp = await self.client.post(url, json=payload)
-            if resp.status_code == 200:
-                logger.info("Successfully registered worker %s with controller at %s",
-                            config.WORKER_ID, url)
-                return True
-            logger.warning("Controller returned HTTP %d on registration: %s",
-                           resp.status_code, resp.text)
-            return False
-        except Exception as e:
-            logger.warning("Failed to connect to controller at %s for registration: %s",
-                           url, e)
-            return False
+        success_any = False
+        for c_url in config.CONTROLLER_URLS:
+            url = f"{c_url}/internal/workers/register"
+            try:
+                resp = await self.client.post(url, json=payload)
+                if resp.status_code == 200:
+                    logger.info("Successfully registered worker %s with controller at %s", config.WORKER_ID, url)
+                    success_any = True
+                else:
+                    logger.warning("Controller at %s returned HTTP %d on registration: %s", url, resp.status_code, resp.text)
+            except Exception as e:
+                logger.debug("Failed to connect to controller at %s for registration: %s", url, e)
+        return success_any
 
     async def _send_heartbeat(self) -> bool:
-        url = f"{config.CONTROLLER_URL}/internal/workers/heartbeat"
         payload = {"worker_id": config.WORKER_ID}
-        try:
-            resp = await self.client.post(url, json=payload)
-            if resp.status_code == 200:
-                return True
-            if resp.status_code == 404:
-                logger.warning("Controller did not recognize worker %s. Re-registering...",
-                               config.WORKER_ID)
-                await self._register()
-                return False
-            logger.warning("Controller returned HTTP %d on heartbeat: %s",
-                           resp.status_code, resp.text)
-            return False
-        except Exception as e:
-            logger.warning("Failed to send heartbeat to controller at %s: %s", url, e)
-            return False
+        success_any = False
+        for c_url in config.CONTROLLER_URLS:
+            url = f"{c_url}/internal/workers/heartbeat"
+            try:
+                resp = await self.client.post(url, json=payload)
+                if resp.status_code == 200:
+                    success_any = True
+                elif resp.status_code == 404:
+                    logger.warning("Controller at %s did not recognize worker %s. Re-registering...", url, config.WORKER_ID)
+                    await self._register()
+            except Exception as e:
+                logger.debug("Heartbeat to controller at %s failed: %s", url, e)
+        return success_any
 
     async def _run_loop(self):
         # Initial registration with retry

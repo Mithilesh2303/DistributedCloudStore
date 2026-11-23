@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 try:
     from controller.src import config
     from controller.src.database import Database
+    from controller.src.journal_client import JournalClient
     from controller.src.manager import ClusterManager
     from controller.src.models import (
         ErrorResponse,
@@ -35,6 +36,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     from src import config
     from src.database import Database
+    from src.journal_client import JournalClient
     from src.manager import ClusterManager
     from src.models import (
         ErrorResponse,
@@ -52,18 +54,21 @@ logging.basicConfig(
 logger = logging.getLogger("controller.api")
 
 db = Database(config.DATABASE_PATH)
-manager = ClusterManager(db)
+journal_client = JournalClient(config.JOURNAL_NODES)
+manager = ClusterManager(db, journal_client=journal_client)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    logger.info("Starting Controller service...")
+    logger.info("Starting Controller service (Role: %s)...", config.CONTROLLER_ROLE)
+    await journal_client.initialize()
     await manager.start()
     yield
     # Shutdown
     logger.info("Shutting down Controller service...")
     await manager.stop()
+    await journal_client.close()
 
 
 app = FastAPI(
@@ -254,6 +259,14 @@ async def upload_object(
             replicas=ch["replicas"],
         )
 
+    # Log to distributed Journal Nodes (EditLog)
+    try:
+        await journal_client.log_edit("OP_CREATE_OBJECT", created_obj)
+        for ch in stored_chunks_info:
+            await journal_client.log_edit("OP_ADD_CHUNK", ch)
+    except Exception as e:
+        logger.warning("Failed to log object upload to journal: %s", e)
+
     logger.info("Successfully uploaded object %s (%s, %d bytes, %d chunks)",
                 object_id, file.filename, total_size, len(stored_chunks_info))
 
@@ -372,6 +385,16 @@ async def update_object_metadata(object_id: str, request: Request):
             detail=f"Object {object_id} not found",
         )
 
+    # Log to distributed Journal Nodes (EditLog)
+    try:
+        await journal_client.log_edit("OP_UPDATE_METADATA", {
+            "object_id": object_id,
+            "custom_metadata": body,
+            "modified_at": now_iso,
+        })
+    except Exception as e:
+        logger.warning("Failed to log metadata update to journal: %s", e)
+
     chunks = db.get_chunks_for_object(object_id)
     return {
         **updated,
@@ -401,6 +424,13 @@ async def delete_object(object_id: str):
     await manager.delete_object_chunks(object_id, chunks)
     # Delete object from metadata store
     db.delete_object(object_id)
+
+    # Log to distributed Journal Nodes (EditLog)
+    try:
+        await journal_client.log_edit("OP_DELETE_OBJECT", {"object_id": object_id})
+    except Exception as e:
+        logger.warning("Failed to log object deletion to journal: %s", e)
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -430,6 +460,26 @@ async def list_objects(
 # 6. Internal Worker APIs
 # -------------------------------------------------------------
 
+@app.get("/health")
+async def health_check():
+    """
+    Health check endpoint for active/standby monitoring.
+    """
+    return {"status": "ok", "role": config.CONTROLLER_ROLE}
+
+
+@app.get("/internal/ha/status")
+async def get_ha_status():
+    """
+    High Availability diagnostic status endpoint.
+    """
+    return {
+        "role": config.CONTROLLER_ROLE,
+        "current_txid": journal_client.current_txid,
+        "journal_nodes": config.JOURNAL_NODES,
+    }
+
+
 @app.post("/internal/workers/register")
 async def register_worker(req: WorkerRegisterRequest):
     """
@@ -437,6 +487,14 @@ async def register_worker(req: WorkerRegisterRequest):
     """
     worker = db.register_worker(req.worker_id, req.host, req.port)
     logger.info("Worker registered: %s (%s:%d)", req.worker_id, req.host, req.port)
+    try:
+        await journal_client.log_edit("OP_REGISTER_WORKER", {
+            "worker_id": req.worker_id,
+            "host": req.host,
+            "port": req.port,
+        })
+    except Exception as e:
+        logger.warning("Failed to log worker registration to journal: %s", e)
     return {"status": "registered", "worker": worker}
 
 
