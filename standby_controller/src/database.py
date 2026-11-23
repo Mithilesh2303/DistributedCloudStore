@@ -111,6 +111,7 @@ class StandbyDatabase:
                         ),
                     )
                 elif op == "OP_ADD_CHUNK":
+                    obj_id = data.get("object_id") or (data["chunk_id"].rsplit("_chunk_", 1)[0] if "_chunk_" in data["chunk_id"] else "")
                     cursor.execute(
                         """
                         INSERT OR REPLACE INTO chunks (chunk_id, object_id, chunk_index, size, checksum)
@@ -118,7 +119,7 @@ class StandbyDatabase:
                         """,
                         (
                             data["chunk_id"],
-                            data["object_id"],
+                            obj_id,
                             data["chunk_index"],
                             data["size"],
                             data["checksum"],

@@ -228,6 +228,7 @@ async def upload_object(
         stored_chunks_info.append(
             {
                 "chunk_id": item["chunk_id"],
+                "object_id": object_id,
                 "chunk_index": item["chunk_index"],
                 "size": item["size"],
                 "checksum": item["checksum"],

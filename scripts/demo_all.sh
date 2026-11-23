@@ -75,16 +75,21 @@ fi
 # ------------------------------------------------------------------------------
 log_step "2. Chunking and Distribution (> 1 MB object)"
 LARGE_FILE="$TEMP_DIR/large_payload.bin"
-log_info "Generating 2.5 MB random binary test file..."
-dd if=/dev/urandom of="$LARGE_FILE" bs=1048576 count=2 status=none
-dd if=/dev/urandom of="$LARGE_FILE" bs=524288 count=1 oflag=append conv=notrunc status=none
+if [ -f "image_to_add.png" ]; then
+    log_info "Using real binary image 'image_to_add.png' (2.55 MB) for chunking demonstration..."
+    cp "image_to_add.png" "$LARGE_FILE"
+else
+    log_info "Generating 2.5 MB random binary test file..."
+    dd if=/dev/urandom of="$LARGE_FILE" bs=1048576 count=2 status=none
+    dd if=/dev/urandom of="$LARGE_FILE" bs=524288 count=1 oflag=append conv=notrunc status=none
+fi
 LARGE_HASH=$(shasum -a 256 "$LARGE_FILE" | awk '{print $1}')
-log_info "Generated file size: $(stat -f%z "$LARGE_FILE" 2>/dev/null || stat -c%s "$LARGE_FILE") bytes. SHA256: $LARGE_HASH"
+log_info "Test file size: $(stat -f%z "$LARGE_FILE" 2>/dev/null || stat -c%s "$LARGE_FILE") bytes. SHA256: $LARGE_HASH"
 
 log_info "Uploading 2.5 MB object..."
 LARGE_UPLOAD=$(curl -s -X POST "$BASE_URL/api/v1/objects" \
-    -F "file=@$LARGE_FILE;type=application/octet-stream" \
-    -F 'metadata={"description": "large file demonstration"}')
+    -F "file=@$LARGE_FILE;type=image/png" \
+    -F 'metadata={"description": "image_to_add demonstration", "type": "image/png"}')
 echo "$LARGE_UPLOAD" | python3 -m json.tool
 
 LARGE_OBJ_ID=$(echo "$LARGE_UPLOAD" | python3 -c "import sys, json; print(json.load(sys.stdin)['object_id'])")

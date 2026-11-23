@@ -27,62 +27,28 @@ try:
     from standby_controller.src.database import StandbyDatabase
     from standby_controller.src.failover import FailoverManager
     from standby_controller.src.manager import StandbyClusterManager
-    from standby_controller.src.syncer import EditLogSyncer
-    from controller.src.journal_client import JournalClient
-    from controller.src.models import (
+    from standby_controller.src.models import (
         ErrorResponse,
         ObjectDetailResponse,
         ObjectListResponse,
         WorkerHeartbeatRequest,
         WorkerRegisterRequest,
     )
+    from standby_controller.src.syncer import EditLogSyncer
 except (ImportError, ModuleNotFoundError):
     from src import config
     from src.checkpoint import FSImageManager
     from src.database import StandbyDatabase
     from src.failover import FailoverManager
     from src.manager import StandbyClusterManager
+    from src.models import (
+        ErrorResponse,
+        ObjectDetailResponse,
+        ObjectListResponse,
+        WorkerHeartbeatRequest,
+        WorkerRegisterRequest,
+    )
     from src.syncer import EditLogSyncer
-    # Fallback schemas
-    from pydantic import BaseModel, Field
-
-    class WorkerRegisterRequest(BaseModel):
-        worker_id: str
-        host: str
-        port: int = 8001
-
-    class WorkerHeartbeatRequest(BaseModel):
-        worker_id: str
-
-    class ChunkInfo(BaseModel):
-        chunk_id: str
-        chunk_index: int
-        size: int
-        checksum: str
-        replicas: List[str] = Field(default_factory=list)
-
-    class ObjectSummary(BaseModel):
-        object_id: str
-        name: str
-        size: int
-        content_type: str
-        created_at: str
-        modified_at: str
-        total_chunks: int
-        custom_metadata: Dict[str, Any] = Field(default_factory=dict)
-
-    class ObjectDetailResponse(ObjectSummary):
-        checksum: str
-        chunks: List[ChunkInfo] = Field(default_factory=list)
-
-    class ObjectListResponse(BaseModel):
-        objects: List[ObjectSummary]
-        total: int
-        page: int
-        limit: int
-
-    class ErrorResponse(BaseModel):
-        error: str
 
 logging.basicConfig(
     level=logging.INFO,
